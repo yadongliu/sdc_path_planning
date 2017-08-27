@@ -8,6 +8,7 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
+#include "spline.h"
 
 using namespace std;
 
@@ -159,6 +160,10 @@ vector<double> getXY(double s, double d, vector<double> maps_s, vector<double> m
 
 }
 
+int lane  = 1; // start in middle lane 1
+double TARGET_VEL = 49.5;
+double ref_vel = 0.1; // target speed in mph
+
 int main() {
   uWS::Hub h;
 
@@ -233,17 +238,148 @@ int main() {
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	auto sensor_fusion = j[1]["sensor_fusion"];
 
+            int prev_size = previous_path_x.size();
+
           	json msgJson;
 
           	vector<double> next_x_vals;
           	vector<double> next_y_vals;
 
+            bool too_close = false;
+            if(prev_size > 0) {
+              car_s = end_path_s;
+            }
+            for(int i=0; i<sensor_fusion.size(); i++) {
+              // check surrounding cars
+              float d = sensor_fusion[i][6];
+              if( d+2.0 > 4.0*(0.5+lane) && d-2.0 < 4.0*(0.5+lane)) {
+                double vx = sensor_fusion[i][3];
+                double vy = sensor_fusion[i][4];
+                double check_car_s = sensor_fusion[i][5];
+                double check_car_speed = sqrt(vx*vx + vy*vy);
+
+                check_car_s += check_car_speed * 0.02 * prev_size;
+                if( (check_car_s > car_s) && (check_car_s - car_s) < 30.0 ) {
+                  too_close = true;
+                }
+              }
+            }
+
+            if(too_close) {
+              ref_vel -= 0.224;
+            } else if(ref_vel < TARGET_VEL) {
+              ref_vel += 0.448;
+            }
+
+            vector<double> ptsx;
+            vector<double> ptsy;
+
+            // where the car is or previous path end point
+            double ref_x = car_x;
+            double ref_y = car_y;
+            double ref_yaw = deg2rad(car_yaw);
+            if(prev_size < 2) {
+              // starting: use two points tangent to the car
+              double pre_ref_x = car_x - cos(car_yaw);
+              double pre_ref_y = car_y + sin(car_yaw);
+
+              ptsx.push_back(pre_ref_x);
+              ptsx.push_back(ref_x);
+              ptsy.push_back(pre_ref_y);
+              ptsy.push_back(ref_y);
+            } else {
+              // last point from the previous path
+              ref_x = previous_path_x[prev_size-1];
+              ref_y = previous_path_y[prev_size-1];
+
+              double pre_ref_x = previous_path_x[prev_size-2];
+              double pre_ref_y = previous_path_y[prev_size-2];
+
+              ref_yaw = atan2(ref_y - pre_ref_y, ref_x - pre_ref_x);
+
+              ptsx.push_back(pre_ref_x);
+              ptsx.push_back(ref_x);
+              ptsy.push_back(pre_ref_y);
+              ptsy.push_back(ref_y);
+            }
+
+            // points ahead of car in 30, 60, 90 meters
+            std::vector<double> next_waypoints_0 = getXY(car_s+30.0, (0.5+lane)*4.0, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            std::vector<double> next_waypoints_1 = getXY(car_s+60.0, (0.5+lane)*4.0, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            std::vector<double> next_waypoints_2 = getXY(car_s+90.0, (0.5+lane)*4.0, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            
+            ptsx.push_back(next_waypoints_0[0]);
+            ptsx.push_back(next_waypoints_1[0]);
+            ptsx.push_back(next_waypoints_2[0]);
+            ptsy.push_back(next_waypoints_0[1]);
+            ptsy.push_back(next_waypoints_1[1]);
+            ptsy.push_back(next_waypoints_2[1]);
+
+            // tranform to car coordinates
+            for(int i=0; i<ptsx.size(); i++) {
+              double shift_x = ptsx[i] - ref_x;
+              double shift_y = ptsy[i] - ref_y;
+
+              ptsx[i] = shift_x * cos(0-ref_yaw) - shift_y * sin(0-ref_yaw);
+              ptsy[i] = shift_x * sin(0-ref_yaw) + shift_y * cos(0-ref_yaw);
+            }
+
+            tk::spline s;
+            s.set_points(ptsx, ptsy);
+
+            for(int i=0; i<previous_path_x.size(); i++) {
+              next_x_vals.push_back(previous_path_x[i]);
+              next_y_vals.push_back(previous_path_y[i]);
+            }
+
+            double target_x = 30.0;
+            double target_y = s(target_x);
+            double target_dist = distance(0.0, 0.0, target_x, target_y);
+            double x_add_on = 0.0;
+            double N = target_dist / (0.02 * ref_vel / 2.24); 
+
+            cout << "car x: " << car_x << ", y: " << car_y << ", yaw: " << ref_yaw 
+            << ", speed: " << car_speed << ", N: " << N 
+            << ", prevSize: " << prev_size<< endl;
+
+            for(int i=1; i <= 50 - previous_path_x.size(); i++) {
+              double x_point = x_add_on + target_x / N;
+              double y_point = s(x_point);
+
+              x_add_on = x_point;
+              
+              double x_ref = x_point;
+              double y_ref = y_point;
+              x_point = x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw);
+              y_point = x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw);
+
+              x_point += ref_x;
+              y_point += ref_y;
+
+              next_x_vals.push_back(x_point);
+              next_y_vals.push_back(y_point);
+            }
 
           	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
+            
+            // Simpele Test: moving the car in a straight line
+            /*
+            double dist_inc = 0.5;
+            for(int i = 0; i < 50; i++) {
+              double next_s = car_s + (i+1) * dist_inc;
+              double next_d =  4.0 * (1 + 0.5); // middle lane;
+              vector<double> xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+              next_x_vals.push_back( xy[0] );
+              next_y_vals.push_back( xy[1] );
+            }
+            */
+            // END - TODO
+
           	msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
 
           	auto msg = "42[\"control\","+ msgJson.dump()+"]";
+            // cout << msg << endl;
 
           	//this_thread::sleep_for(chrono::milliseconds(1000));
           	ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
