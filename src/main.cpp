@@ -9,6 +9,7 @@
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
 #include "spline.h"
+#include "vehicle.h"
 
 using namespace std;
 
@@ -175,12 +176,13 @@ int main() {
   vector<double> map_waypoints_dy;
 
   // Waypoint map to read from
-  string map_file_ = "../data/highway_map.csv";
+  string map_file_ = "../data/highway_map.csv"; // "../data/highway_map.csv";
   // The max s value before wrapping around the track back to 0
-  double max_s = 6945.554;
+  double max_s = 0.0; // 6945.554;
 
   ifstream in_map_(map_file_.c_str(), ifstream::in);
 
+  double s_prev = 0.0;
   string line;
   while (getline(in_map_, line)) {
   	istringstream iss(line);
@@ -194,12 +196,23 @@ int main() {
   	iss >> s;
   	iss >> d_x;
   	iss >> d_y;
+    if(s > max_s) {
+      max_s = s;
+    }
+
+    if(max_s > 30.0 && (s - s_prev) < 0.00001) {
+      break;
+    }
+    s_prev = s;
+
   	map_waypoints_x.push_back(x);
   	map_waypoints_y.push_back(y);
   	map_waypoints_s.push_back(s);
   	map_waypoints_dx.push_back(d_x);
   	map_waypoints_dy.push_back(d_y);
   }
+
+  cout << "max_s: " << max_s << ", way_point_size: " << map_waypoints_x.size() << endl;
 
   h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
@@ -246,29 +259,55 @@ int main() {
           	vector<double> next_y_vals;
 
             bool too_close = false;
+            bool car_on_left = false;
+            bool car_on_right = false;
             if(prev_size > 0) {
               car_s = end_path_s;
             }
             for(int i=0; i<sensor_fusion.size(); i++) {
               // check surrounding cars
               float d = sensor_fusion[i][6];
-              if( d+2.0 > 4.0*(0.5+lane) && d-2.0 < 4.0*(0.5+lane)) {
                 double vx = sensor_fusion[i][3];
                 double vy = sensor_fusion[i][4];
                 double check_car_s = sensor_fusion[i][5];
                 double check_car_speed = sqrt(vx*vx + vy*vy);
 
+              if(d+2.0 > 4.0*(lane+0.5) && d-2.0 < 4.0*(lane+0.5)) {
                 check_car_s += check_car_speed * 0.02 * prev_size;
                 if( (check_car_s > car_s) && (check_car_s - car_s) < 30.0 ) {
                   too_close = true;
                 }
+              } else if(d+2.0 > 4.0*(lane+1.5) && d-2.0 < 4.0*(lane+1.5)) {
+                double car_dist = abs(check_car_s - car_s);
+                if(car_dist < 20.0) {
+                  car_on_right = true;
+                }
+              } else if(d+2.0 > 4.0*(lane-0.5) && d-2.0 < 4.0*(lane-0.5)) {
+                double car_dist = abs(check_car_s - car_s);
+                if(car_dist < 20.0) {
+                  car_on_left = true;
+                }
               }
             }
 
-            if(too_close) {
-              ref_vel -= 0.224;
+            if(car_on_left) 
+              cout << "Car on left ..." << endl;
+
+            if(car_on_right) 
+              cout << "Car on right ..." << endl;
+
+            if(too_close) { 
+              if(lane > 0 && car_on_left != true) {
+                lane = lane - 1;
+              } else if(lane == 0 && car_on_right != true) {
+                lane = 1;
+              } else if(lane==1 && car_on_right != true) {
+                lane = 2;
+              } else {
+                ref_vel -= 0.224;
+              }
             } else if(ref_vel < TARGET_VEL) {
-              ref_vel += 0.448;
+              ref_vel += 0.224;
             }
 
             vector<double> ptsx;
@@ -338,9 +377,9 @@ int main() {
             double x_add_on = 0.0;
             double N = target_dist / (0.02 * ref_vel / 2.24); 
 
-            cout << "car x: " << car_x << ", y: " << car_y << ", yaw: " << ref_yaw 
+            /*cout << "car x: " << car_x << ", y: " << car_y << ", yaw: " << ref_yaw 
             << ", speed: " << car_speed << ", N: " << N 
-            << ", prevSize: " << prev_size<< endl;
+            << ", prevSize: " << prev_size<< endl;*/
 
             for(int i=1; i <= 50 - previous_path_x.size(); i++) {
               double x_point = x_add_on + target_x / N;
